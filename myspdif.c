@@ -28,7 +28,7 @@ void my_spdif_bswap_buf16(uint16_t *dst, const uint16_t *src, int w)
     int i;
 
     for (i = 0; i + 8 <= w; i += 8) {
-        dst[i + 0] = av_bswap16(src[i + 0]);
+        dst[i    ] = av_bswap16(src[i    ]);
         dst[i + 1] = av_bswap16(src[i + 1]);
         dst[i + 2] = av_bswap16(src[i + 2]);
         dst[i + 3] = av_bswap16(src[i + 3]);
@@ -38,5 +38,13 @@ void my_spdif_bswap_buf16(uint16_t *dst, const uint16_t *src, int w)
         dst[i + 7] = av_bswap16(src[i + 7]);
     }
     for (; i < w; i++)
-        dst[i + 0] = av_bswap16(src[i + 0]);
+        dst[i] = av_bswap16(src[i]);
+}
+
+double gettimeofday_ms()
+{
+  struct timeval stamp;
+  gettimeofday(&stamp, NULL);
+
+  return stamp.tv_sec * 1000.0L + stamp.tv_usec / 1000.0L;
 }

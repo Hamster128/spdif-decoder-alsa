@@ -1,10 +1,20 @@
 #define _GNU_SOURCE
 
+/*
+journalctl -r -u dsp
+*/
+
 #include <math.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <err.h>
 #include <getopt.h>
+
+#include <sys/socket.h> 
+#include <arpa/inet.h> 
+#include <netinet/in.h> 
+#include <netinet/tcp.h>
+#include <netdb.h>
 
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -13,125 +23,442 @@
 #include <libavformat/avio.h>
 #include <libavformat/spdif.h>
 
+#include <alsa/asoundlib.h>
+
 #include "resample.h"
 #include "helper.h"
 #include "myspdif.h"
 #include "codechandler.h"
 
 //#define DEBUG
-//#define IO_BUFFER_SIZE	SPDIF_MAX_OFFSET// ((8+1792+4344)*1)
-#define IO_BUFFER_SIZE	((8+1792+4344)*1)
+//#define MAX_BURST_SIZE	24576           //  Dolby Digital+ bust            = 6144 frames = 128ms
+#define MAX_BURST_SIZE	(8+1792+4344)     //  Dolby Digital  bust 6144 bytes = 1536 frames =  32ms
+#define I_BUFFER_SIZE 768
 
+typedef double sample_t;
+
+char *alsa_dev_name = NULL;
+char *out_dev_buffer_time = "64"; // 2 packets of 32ms
+AVFormatContext *spdif_ctx = NULL;
+unsigned char *alsa_buf = NULL;
+AVInputFormat *spdif_fmt = NULL;
+CodecHandler codecHandler;
 
 struct alsa_read_state {
-	AVFormatContext *ctx;
-	AVPacket	 pkt;
-	int		 offset;
+	snd_pcm_t *dev;
 };
+snd_pcm_t *out_dev = NULL;
 
-static int debug_data;
+struct alsa_read_state read_state = {.dev = NULL,};
 
-static void
-usage(void)
+int debug_data = 0, skip_packets_after_restart = 0, skipPkts = 0, progPos = 0, progCycles = 0;
+
+//--------------------------------------------------------------------------------------------------
+void usage(void)
 {
 	fprintf(stderr,
 		"usage:\n"
-		"  spdif-loop [-t | -i <hw:alsa-input-dev>] -d <alsa|pulse> -o <output-dev>\n");
+		"  spdif-loop -i <alsa-input-dev> -o <alsa-output-dev>\n\n"
+
+    " -b n ... output device buffer time in ms (default 2 packets = 64ms)\n"
+    " -s n ... skip n packets after codec change (default 0)\n"
+    " -v   ... verbose\n");
 	exit(1);
 }
 
-static int
-alsa_reader(void *data, uint8_t *buf, int buf_size)
+//--------------------------------------------------------------------------------------------------
+static int alsa_reader(void *data, uint8_t *buf, int buf_size)
 {
-	struct alsa_read_state *st = data;
-	int read_size = 0;
+	struct alsa_read_state *state = data;
+  double start = 0;
 
-	while (buf_size > 0) {
-		if (st->pkt.size <= 0) {
-			int ret = av_read_frame(st->ctx, &st->pkt);
-			st->offset = 0;
+  if(debug_data) 
+  {
+    printf("alsa_reader %d bytes\n", buf_size);
+    start = gettimeofday_ms();
+  }
 
-			if (ret != 0)
-				return (ret);
-		}
+	if (snd_pcm_state(state->dev) == SND_PCM_STATE_SETUP)
+  {
+  	int err = snd_pcm_prepare(state->dev);
 
-		int pkt_left = st->pkt.size - st->offset;
-		int datsize = buf_size < pkt_left ? buf_size : pkt_left;
+	  if(err < 0)
+    {
+      printf("error: alsa failed to prepare input device: %s", snd_strerror(err));
+      return AVERROR_EOF;
+    }
+  }
 
-		memcpy(buf, st->pkt.data + st->offset, datsize);
-		st->offset += datsize;
-		read_size += datsize;
-		buf += datsize;
-		buf_size -= datsize;
+  int frames = buf_size / 4;
 
-		if (debug_data) {
-			static int had_zeros = 0;
-			int i;
-			for (i = 0; i < read_size; ++i) {
-				const char zeros[16] = {0};
-				if (i % 16 == 0 && read_size - i >= 16 &&
-				    memcmp((char *)buf + i, zeros, 16) == 0) {
-					i += 15;
-					if (had_zeros && had_zeros % 10000 == 0)
-						printf("  (%d)\n", had_zeros * 16);
-					if (!had_zeros)
-						printf("...\n");
-					had_zeros++;
-					continue;
-				}
-				if (had_zeros)
-					printf("  (%d)\n", had_zeros * 16);
-				had_zeros = 0;
-				printf("%02x%s", ((unsigned char *)buf)[i],
-				       (i + 1) % 16 == 0 ? "\n" : " ");
-			}
-		}
+	while(1)
+  {
+    ssize_t n = snd_pcm_readi(state->dev, (char *) buf, frames);
 
-		if (st->offset >= st->pkt.size)
-			av_free_packet(&st->pkt);
-	}
+    if(n >= 0) 
+    {
+      if(debug_data)
+        printf("alsa_reader %d bytes in %.1f ms\n", n*4, gettimeofday_ms() - start);
 
-	return (read_size);
+      return n * 4;
+    }
+
+    if (n == -EPIPE)
+      printf("warning: alsa input overrun occurred\n");
+    else
+      printf("warning: alsa input %s\n", snd_strerror(n));
+
+    n = snd_pcm_recover(state->dev, n, 1);
+
+    if (n < 0)
+    {
+      printf("error: alsa input recover failed %s\n", snd_strerror(n));
+      return AVERROR_EOF;
+    }
+  }
 }
 
-int
-main(int argc, char **argv)
+
+//--------------------------------------------------------------------------------------------------
+/*
+#define ALSA_MAX_CHANNELS 6
+static snd_pcm_chmap_t* alsa_create_channel_map(int channels)
 {
-	int opt_test = 0;
-	char *alsa_dev_name = NULL;
-	char *out_driver_name = NULL;
+  size_t size = offsetof(snd_pcm_chmap_t, pos[channels]);
+  snd_pcm_chmap_t* map = (snd_pcm_chmap_t*) calloc(1, size);
+
+  // Using SMPTE layout:
+  enum snd_pcm_chmap_position layout[ALSA_MAX_CHANNELS][ALSA_MAX_CHANNELS] = {
+    { SND_CHMAP_MONO },
+    { SND_CHMAP_FL, SND_CHMAP_FR },
+    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_LFE },
+    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_SL, SND_CHMAP_SR },
+    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_SL, SND_CHMAP_SR, SND_CHMAP_FC},
+    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_SL, SND_CHMAP_SR, SND_CHMAP_FC, SND_CHMAP_LFE}
+  };
+
+  map->channels = channels;
+
+  for (int i = 0 ; i < map->channels ; ++i) 
+  {
+    map->pos[i] = layout[map->channels - 1][i];
+  }
+
+  return map;
+}
+*/
+//--------------------------------------------------------------------------------------------------
+ssize_t alsa_write(sample_t *buf, int buf_size)
+{
+	ssize_t n;
+
+	if (snd_pcm_state(out_dev) == SND_PCM_STATE_SETUP)
+  {
+  	int err = snd_pcm_prepare(out_dev);
+
+	  if(err < 0)
+    {
+      printf("error: alsa failed to prepare output device: %s\n", snd_strerror(err));
+      return 0;
+    }
+
+/*  
+    snd_pcm_chmap_t *map = alsa_create_channel_map(codecHandler.currentChannelCount);
+
+    if(!map)
+    {
+      printf("alsa error: cannot create channel map\n");
+      return 0;
+    }
+
+    err = snd_pcm_set_chmap(out_dev, map);
+    free(map);
+
+    if(err)
+    {
+      printf("alsa error: cannot set channel map %s\n", snd_strerror(err));
+      return 0;
+    }
+*/    
+  }
+
+  int frames = buf_size / 2 / codecHandler.currentChannelCount;
+
+  while(1) 
+  {
+    n = snd_pcm_writei(out_dev, buf, frames);
+
+    if(n >= 0)
+      return n;
+
+    if (n == -EPIPE)
+      printf("warning: alsa output underrun occurred\n");
+    else
+      printf("warning: alsa output %s\n", snd_strerror(n));
+
+    n = snd_pcm_recover(out_dev, n, 1);
+
+    if (n < 0) 
+    {
+      printf("error: alsa output recover failed %s\n", snd_strerror(n));
+      return 0;
+    }
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+snd_pcm_t* alsa_open(char* dev_name, int channels)
+{
+	snd_pcm_hw_params_t *p = NULL;
+  snd_pcm_t *dev = NULL;
+  int err;
+
+	if ((err = snd_pcm_open(&dev, dev_name, channels ? SND_PCM_STREAM_PLAYBACK : SND_PCM_STREAM_CAPTURE, 0)) < 0)
+		errx(1, "alsa error: failed to open device: %s", snd_strerror(err));
+	
+	if ((err = snd_pcm_hw_params_malloc(&p)) < 0)
+		errx(1, "alsa error: failed to allocate hw params: %s", snd_strerror(err));
+	
+	if ((err = snd_pcm_hw_params_any(dev, p)) < 0)
+		errx(1, "alsa error: failed to initialize hw params: %s", snd_strerror(err));
+	
+
+	if ((err = snd_pcm_hw_params_set_access(dev, p, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
+		errx(1, "alsa error: failed to set access: %s", snd_strerror(err));
+	
+	if ((err = snd_pcm_hw_params_set_format(dev, p, SND_PCM_FORMAT_S16)) < 0)
+		errx(1, "alsa error: failed to set format: %s", snd_strerror(err));
+
+	if ((err = snd_pcm_hw_params_set_rate(dev, p, 48000, 0)) < 0)
+		errx(1, "alsa error: failed to set rate: %s", snd_strerror(err));
+
+	if (channels)
+  {
+    unsigned int us = atoi(out_dev_buffer_time) * 1000;
+    if(( err = snd_pcm_hw_params_set_buffer_time_min(dev, p, &us, 0)) < 0)
+  		errx(1, "alsa error: cannot set output device buffer_time %s %s", out_dev_buffer_time, snd_strerror(err));
+
+    if(debug_data)
+      printf("alse open output, channels=%d\n", channels);
+  } 
+  else
+  {
+    channels = 2;
+    if(debug_data)
+      printf("alse open input, channels=%d\n", channels);
+  }
+
+	if ((err = snd_pcm_hw_params_set_channels(dev, p, channels)) < 0)
+		errx(1, "alsa error: failed to set channels %d: %s", channels, snd_strerror(err));
+
+	if ((err = snd_pcm_hw_params(dev, p)) < 0) 
+		errx(1, "alsa error: failed to set params: %s", snd_strerror(err));
+
+	snd_pcm_hw_params_free(p);
+
+  return dev;
+}
+
+//--------------------------------------------------------------------------------------------------
+void* sendInfoToSocketThread(CodecHandler* codecHandler)
+{
+  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  
+  if (sockfd < 0)
+    return;
+
+  /* get the address of the host */
+  struct hostent* hptr = gethostbyname("localhost");
+  
+  if (!hptr) 
+  {
+    printf("sendInfoToSocket: gethostbyname\n");
+    return;
+  }
+
+  if (hptr->h_addrtype != AF_INET) /* versus AF_LOCAL */
+  {
+    printf("sendInfoToSocket: bad address family\n");
+    return;
+  }
+
+  /* connect to the server: configure server's address 1st */
+  struct sockaddr_in saddr; 
+  memset(&saddr, 0, sizeof(saddr)); 
+  saddr.sin_family = AF_INET; 
+  saddr.sin_addr.s_addr = ((struct in_addr*) hptr->h_addr_list[0])->s_addr;  
+  saddr.sin_port = htons(8787);
+
+  if (connect(sockfd, (struct sockaddr*) &saddr, sizeof(saddr)) < 0) 
+    return;
+
+  char msg[1024];
+
+  sprintf(msg, "{\"codec\":\"%s\", \"channels\":%d}\n", 
+    avcodec_get_name(codecHandler->currentCodecID), 
+    codecHandler->currentChannelCount);
+
+  write(sockfd, msg, strlen(msg));
+  
+  close(sockfd); /* close the connection */
+}
+
+//--------------------------------------------------------------------------------------------------
+void sendInfoToSocket(CodecHandler* codecHandler)
+{
+  pthread_t threadId;
+  int err = pthread_create(&threadId, NULL, &sendInfoToSocketThread, codecHandler);
+}
+
+//--------------------------------------------------------------------------------------------------
+void* watchDogThread(void *nix)
+{
+  fprintf(stderr, "watchDog started\n");
+
+  while(1)
+  {
+    sleep(60);
+
+    time_t timer;
+    char timeStamp[26];
+    struct tm* tm_info;
+
+    timer = time(NULL);
+    tm_info = localtime(&timer);
+
+    strftime(timeStamp, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+
+    fprintf(stderr, "%s progPos %d %d\n", timeStamp, progCycles, progPos);
+  }
+}
+
+//--------------------------------------------------------------------------------------------------
+void watchDog()
+{
+  pthread_t threadId;
+  int err = pthread_create(&threadId, NULL, &watchDogThread, NULL);
+}
+
+//--------------------------------------------------------------------------------------------------
+void initContext() 
+{
+  if(debug_data) printf("initContext...\n");
+
+  if(spdif_ctx) 
+    avformat_close_input(&spdif_ctx);
+
+	spdif_ctx = avformat_alloc_context();
+	if (!spdif_ctx)
+		errx(1, "cannot allocate S/PDIF context");
+
+	alsa_buf = av_malloc(I_BUFFER_SIZE);
+	if (!alsa_buf)
+		errx(1, "cannot allocate input buffer");
+
+	spdif_ctx->pb = avio_alloc_context(alsa_buf, I_BUFFER_SIZE, 0, &read_state, alsa_reader, NULL, NULL);
+
+	if (!spdif_ctx->pb)
+		errx(1, "cannot set up alsa reader");
+
+	if (avformat_open_input(&spdif_ctx, "internal", spdif_fmt, NULL) != 0)
+		errx(1, "cannot open S/PDIF input");
+
+  if(debug_data) printf("initContext...ok\n");
+}
+
+//--------------------------------------------------------------------------------------------------
+void closeOutDev()
+{
+  if (!out_dev) 
+    return;
+  
+  snd_pcm_close(out_dev);
+  out_dev = NULL;
+}
+
+//--------------------------------------------------------------------------------------------------
+void closeInDev()
+{
+  if (!read_state.dev)
+    return;
+  
+ 	snd_pcm_close(read_state.dev);
+  read_state.dev = NULL;
+}
+
+//--------------------------------------------------------------------------------------------------
+void reinit()
+{
+  progPos = 4001;
+
+  printf("reinit...\n");
+
+  closeOutDev();
+  progPos = 4002;
+  closeInDev();
+  progPos = 4003;
+  CodecHandler_closeCodec(&codecHandler);
+  progPos = 4004;
+  CodecHandler_deinit(&codecHandler);
+  progPos = 4005;
+
+  // snd_pcm_drain(read_state.dev); // long delay !?
+
+  read_state.dev = alsa_open(alsa_dev_name, 0);
+  progPos = 4006;
+  initContext();
+  progPos = 4007;
+  CodecHandler_init(&codecHandler);
+
+  progPos = 4008;
+  skipPkts = skip_packets_after_restart; // skip first packets on next start to prevent cracks and latencies
+
+  printf("reinit...ok\n");
+	fflush(stdout);
+  progPos = 4009;
+}
+
+//--------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+int main(int argc, char **argv)
+{
+  watchDog();
+
 	char *out_dev_name = NULL;
 	int opt;
-	for (opt = 0; (opt = getopt(argc, argv, "d:hi:o:tv")) != -1;) {
+  double start = 0;
+
+	for (opt = 0; (opt = getopt(argc, argv, "hi:o:vb:s:")) != -1;) {
 		switch (opt) {
-		case 'd':
-			out_driver_name = optarg;
-			break;
 		case 'i':
 			alsa_dev_name = optarg;
 			break;
 		case 'o':
 			out_dev_name = optarg;
 			break;
-		case 't':
-			opt_test = 1;
-			break;
 		case 'v':
 			debug_data = 1;
 			break;
+    case 'b':
+      out_dev_buffer_time = optarg;
+      break;
+    case 's':
+      skipPkts = skip_packets_after_restart = atoi(optarg);
+      break;
 		default:
 			usage();
-			/* NOTREACHED */
 		}
 	}
+
 	argc -= optind;
 	argv += optind;
 
 	if (argc != 0)
 		usage();
 
-	if (!(opt_test ^ !!alsa_dev_name)) {
-		fprintf(stderr, "please specify either input device or testing mode\n\n");
+	if (!alsa_dev_name)
+  {
+		fprintf(stderr, "please specify input device\n\n");
 		usage();
 	}
 
@@ -140,149 +467,138 @@ main(int argc, char **argv)
 	avdevice_register_all();
 	ao_initialize();
 
+  char *resamples = malloc(1*1024*1024);
 
-	ao_option *out_dev_opts = NULL;
-	if (out_dev_name) {
-		if (!ao_append_option(&out_dev_opts, "dev", out_dev_name))
-			errx(1, "cannot set output device `%s'", out_dev_name);
-	}
+  read_state.dev = alsa_open(alsa_dev_name, 0);
 
-
-	int out_driver_id = ao_default_driver_id();
-	if (out_driver_name)
-		out_driver_id = ao_driver_id(out_driver_name);
-	if (out_driver_id < 0)
-		errx(1, "invalid output driver `%s'",
-		     out_driver_name ? out_driver_name : "default");
-
-	if (opt_test) {
-		exit(test_audio_out(out_driver_id, out_dev_opts));
-		// NOTREACHED
-	}
-
-
-	AVInputFormat *alsa_fmt = av_find_input_format("alsa");
-	if (!alsa_fmt)
-		errx(1, "cannot find alsa input driver");
-
-	AVInputFormat *spdif_fmt = av_find_input_format("spdif");
+	spdif_fmt = av_find_input_format("spdif");
 	if (!spdif_fmt)
 		errx(1, "cannot find S/PDIF demux driver");
 
-	const int alsa_buf_size = IO_BUFFER_SIZE;
-	unsigned char *alsa_buf = av_malloc(alsa_buf_size);
-	if (!alsa_buf)
-		errx(1, "cannot allocate input buffer");
+  initContext();
 
-	AVFormatContext *spdif_ctx = NULL;
-	AVFormatContext *alsa_ctx = NULL;
-	ao_device *out_dev = NULL;
+  AVPacket pkt = {.size = 0, .data = NULL};
+  memset(&pkt, 0, sizeof(AVPacket));
+  av_init_packet(&pkt);
 
-    char *resamples = malloc(1*1024*1024);
+  uint32_t howmuch = 0;
+  
+  CodecHandler_init(&codecHandler);
 
-	if (0) {
-retry:
-		if (spdif_ctx)
-			avformat_close_input(&spdif_ctx);
-		if (alsa_ctx)
-			avformat_close_input(&alsa_ctx);
-		if (out_dev) {
-			ao_close(out_dev);
-			out_dev = NULL;
-		}
-		sleep(1);
-		printf("retrying.\n");
-	}
+	printf("start loop\n");
 
-	spdif_ctx = avformat_alloc_context();
-	if (!spdif_ctx)
-		errx(1, "cannot allocate S/PDIF context");
+	while(1) 
+  {
+    progPos = 1000;
+    progCycles ++;
 
-	if (avformat_open_input(&alsa_ctx, alsa_dev_name, alsa_fmt, NULL) != 0)
-		errx(1, "cannot open alsa input");
+    if(debug_data)
+      start = gettimeofday_ms();
 
-	struct alsa_read_state read_state = {
-		.ctx = alsa_ctx,
-	};
+		int ret = my_spdif_read_packet(spdif_ctx, &pkt, (uint8_t*)resamples, MAX_BURST_SIZE, &howmuch);
 
-	av_init_packet(&read_state.pkt);
-	AVIOContext * avio_ctx = avio_alloc_context(alsa_buf, alsa_buf_size, 0, &read_state, alsa_reader, NULL, NULL);
-    if (!avio_ctx) {
-    	errx(1, "cannot open avio_alloc_context");
+    progPos = 2000;
+
+    if(ret == SPIF_DECODER_RETRY_REQUIRED)
+      continue;
+
+    progPos = 3000;
+
+    if(ret == SPIF_DECODER_RESTART_REQUIRED)
+    {
+      // codec changed ... reinit system
+      progPos = 4000;
+      reinit();
+      continue;
     }
 
-	spdif_ctx->pb = avio_alloc_context(alsa_buf, alsa_buf_size, 0, &read_state, alsa_reader, NULL, NULL);
-	if (!spdif_ctx->pb)
-		errx(1, "cannot set up alsa reader");
+    progPos = 5000;
 
-	if (avformat_open_input(&spdif_ctx, "internal", spdif_fmt, NULL) != 0)
-		errx(1, "cannot open S/PDIF input");
+    if(ret && ret != SPIF_DECODER_PCM)
+      errx(1, "error: read packet");
 
-	av_dump_format(alsa_ctx, 0, alsa_dev_name, 0);
+    if(debug_data)
+      printf("read_packet() bytes=%d in %.1lf ms\n", pkt.size, gettimeofday_ms() - start);
 
-	AVPacket pkt = {.size = 0, .data = NULL};
-	av_init_packet(&pkt);
+    if(ret == SPIF_DECODER_PCM)
+    {
+      progPos = 6000;
 
-    uint32_t howmuch = 0;
+      CodecHandler_closeCodec(&codecHandler);
+      codecHandler.currentChannelCount = 2;
+      codecHandler.currentSampleRate = 48000;
+      howmuch = MAX_BURST_SIZE;
+      progPos = 7000;
+    }
+    else
+    {
+      progPos = 8000;
+      CodecHandler_loadCodec(&codecHandler, spdif_ctx);
 
-    CodecHandler codecHanlder;
-    CodecHandler_init(&codecHanlder);
-	printf("start loop\n");
-	while (1) {
-		int r = my_spdif_read_packet(spdif_ctx, &pkt, (uint8_t*)resamples, IO_BUFFER_SIZE, &howmuch);
+      if( (ret = CodecHandler_decodeCodec(&codecHandler, &pkt, (uint8_t*)resamples, &howmuch)) == 1)
+      {
+        //channel count has changed
+        closeOutDev();
+      }
 
-		if(r == 0){
-			if(CodecHandler_loadCodec(&codecHanlder, spdif_ctx)!=0){
-				printf("Could not load codec %s.\n", avcodec_get_name(codecHanlder.currentCodecID));
-				goto retry;
-			}
+      progPos = 9000;
 
-			if(CodecHandler_decodeCodec(&codecHanlder,&pkt,(uint8_t*)resamples, &howmuch) == 1){
-				//channel count has changed
-				//close out_dev
-				if (out_dev) {
-					ao_close(out_dev);
-					out_dev = NULL;
-				}
-				printf("Detected S/PDIF codec %s\n", avcodec_get_name(codecHanlder.currentCodecID));
-			}
-			if(pkt.size != 0){
-				printf("still some bytes left %d\n",pkt.size);
-			}
-		} else {
-			if(codecHanlder.currentCodecID != AV_CODEC_ID_NONE ||
-				codecHanlder.currentChannelCount != 2 ||
-				codecHanlder.currentSampleRate != 48000){
+      if(!ret && !codecHandler.currentSampleRate) 
+      {
+        // decodeing did not set a sample rate > retry
+        printf("no sample rate detected!\n");
+        ret = SPIF_DECODER_RESTART_REQUIRED;
+      }
 
-				printf("Detected S/PDIF uncompressed audio\n");
+      if(ret == SPIF_DECODER_RESTART_REQUIRED) 
+      {
+        // decodeing failed, restart
+        progPos = 10000;
+        reinit();
+        progPos = 11000;
+        continue;
+      }
 
-				if (out_dev) {
-					ao_close(out_dev);
-					out_dev = NULL;
-				}
-			}
-			codecHanlder.currentCodecID = AV_CODEC_ID_NONE;
-			codecHanlder.currentChannelCount = 2;
-			codecHanlder.currentSampleRate = 48000;
-			codecHanlder.currentChannelLayout = 0;
-		}
+      progPos = 12000;
 
-		if (!out_dev) {
-			out_dev = open_output(out_driver_id,
-					      out_dev_opts,
-					      av_get_bytes_per_sample(AV_SAMPLE_FMT_S16) * 8,
-					      codecHanlder.currentChannelCount,
-					      codecHanlder.currentSampleRate);
-			if (!out_dev)
-				errx(1, "cannot open audio output");
-		}
-		//found wav
-		if(!ao_play(out_dev, resamples, howmuch)){
-			printf("Could not play audio to output device...");
-			goto retry;
-		}
-                 av_packet_unref(&pkt); 
+      if(pkt.size != 0)
+        printf("still some bytes left %d\n",pkt.size);
+    }
+
+    if (!out_dev) 
+    {
+      progPos = 13000;
+      sendInfoToSocket(&codecHandler);
+
+      progPos = 14000;
+
+      out_dev = alsa_open(out_dev_name, codecHandler.currentChannelCount);
+
+      progPos = 15000;
+
+      if (!out_dev)
+        errx(1, "cannot open audio output, channels=%d, format=s16, rate=%d", codecHandler.currentChannelCount, codecHandler.currentSampleRate);
+
+      progPos = 16000;
+    }
+
+    if(debug_data)
+      start = gettimeofday_ms();
+
+    progPos = 17000;
+
+    if(!alsa_write(resamples, howmuch))
+      errx(1, "Could not play audio to output device");
+
+    progPos = 18000;
+
+    if(debug_data)
+      printf("alsa_write() frames=%d ms=%.1f in %.1lf ms\n", howmuch / 2 / codecHandler.currentChannelCount, howmuch / 2 / codecHandler.currentChannelCount / 48.0, gettimeofday_ms() - start);
+
+    av_packet_unref(&pkt); 
+
+    progPos = 19000;
 	}
-	CodecHandler_deinit(&codecHanlder);
+
 	return (0);
 }

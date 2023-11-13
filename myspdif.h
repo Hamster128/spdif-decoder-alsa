@@ -23,12 +23,17 @@
 #define MYSPDIF_H_
 
 #include <stdint.h>
+#include <sys/time.h>
 #include <libavformat/avformat.h>
 
 #define SYNCWORD1 0xF872
 #define SYNCWORD2 0x4E1F
 #define BURST_HEADER_SIZE 0x8
 #define SPDIF_MAX_OFFSET 16384
+
+#define SPIF_DECODER_RETRY_REQUIRED   1
+#define SPIF_DECODER_RESTART_REQUIRED 2
+#define SPIF_DECODER_PCM              3
 
 /*
 enum myIEC61937DataType {
@@ -66,6 +71,8 @@ void my_spdif_bswap_buf16(uint16_t *dst, const uint16_t *src, int w);
 int my_spdif_read_packet(AVFormatContext *s, AVPacket *pkt,
 		uint8_t * garbagebuffer, int garbagebuffersize, int * garbagebufferfilled);
 int my_spdif_probe(const uint8_t *p_buf, int buf_size, enum AVCodecID *codec);
+
+double gettimeofday_ms();
 
 
 #endif /* MYSPDIF_H_ */

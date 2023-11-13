@@ -10,7 +10,7 @@ add_executable (spdif-decoder
     spdif-loop.c
 )
 
-SET(FFMPEG ${CMAKE_CURRENT_SOURCE_DIR}/../ffmpeg-4.3.1)
+SET(FFMPEG ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-4.3.1)
 
 target_include_directories (spdif-decoder
     PUBLIC ${FFMPEG}
@@ -22,6 +22,8 @@ FIND_LIBRARY(libavdevice avdevice ${FFMPEG}/libavdevice)
 FIND_LIBRARY(libavutil avutil ${FFMPEG}/libavutil)
 FIND_LIBRARY(libswresample swresample ${FFMPEG}/libswresample)
 FIND_LIBRARY(libavfilter avfilter ${FFMPEG}/libavfilter)
+FIND_LIBRARY(libasound asound)
+FIND_LIBRARY(libpthread pthread)
 TARGET_LINK_LIBRARIES(spdif-decoder 
     ${libavcodec}
     ${libavformat}
@@ -29,6 +31,8 @@ TARGET_LINK_LIBRARIES(spdif-decoder
     ${libavutil}
     ${libswresample}
     ${libavfilter}
+    ${libasound}
+    ${libpthread}
     ao
     m
 )
