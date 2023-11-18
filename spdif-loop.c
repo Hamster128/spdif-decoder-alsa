@@ -52,6 +52,7 @@ snd_pcm_t *out_dev = NULL;
 struct alsa_read_state read_state = {.dev = NULL,};
 
 int debug_data = 0, skip_packets_after_restart = 0, skipPkts = 0, progPos = 0, progCycles = 0;
+int outDelay = 0;
 
 //--------------------------------------------------------------------------------------------------
 void usage(void)
@@ -182,6 +183,21 @@ ssize_t alsa_write(sample_t *buf, int buf_size)
 */    
   }
 
+  snd_pcm_sframes_t delay;
+  int err;
+  if ((err = snd_pcm_delay(out_dev, &delay)) < 0)
+    printf("alsa error: failed to get output latency: %s\n", snd_strerror(err));
+  else
+  {
+    delay /= 48;
+
+    if(delay > outDelay) 
+    {
+    outDelay = delay;
+    printf("alsa output latency: %d ms\n", outDelay);
+    }
+  }
+
   int frames = buf_size / 2 / codecHandler.currentChannelCount;
 
   while(1) 
@@ -221,7 +237,6 @@ snd_pcm_t* alsa_open(char* dev_name, int channels)
 	
 	if ((err = snd_pcm_hw_params_any(dev, p)) < 0)
 		errx(1, "alsa error: failed to initialize hw params: %s", snd_strerror(err));
-	
 
 	if ((err = snd_pcm_hw_params_set_access(dev, p, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
 		errx(1, "alsa error: failed to set access: %s", snd_strerror(err));
@@ -235,8 +250,9 @@ snd_pcm_t* alsa_open(char* dev_name, int channels)
 	if (channels)
   {
     unsigned int us = atoi(out_dev_buffer_time) * 1000;
+
     if(( err = snd_pcm_hw_params_set_buffer_time_min(dev, p, &us, 0)) < 0)
-  		errx(1, "alsa error: cannot set output device buffer_time %s %s", out_dev_buffer_time, snd_strerror(err));
+  		errx(1, "alsa error: cannot set output device buffer_time_min %s %s", out_dev_buffer_time, snd_strerror(err));
 
     if(debug_data)
       printf("alse open output, channels=%d\n", channels);
@@ -311,35 +327,6 @@ void sendInfoToSocket(CodecHandler* codecHandler)
 }
 
 //--------------------------------------------------------------------------------------------------
-void* watchDogThread(void *nix)
-{
-  fprintf(stderr, "watchDog started\n");
-
-  while(1)
-  {
-    sleep(60);
-
-    time_t timer;
-    char timeStamp[26];
-    struct tm* tm_info;
-
-    timer = time(NULL);
-    tm_info = localtime(&timer);
-
-    strftime(timeStamp, 26, "%Y-%m-%d %H:%M:%S", tm_info);
-
-    fprintf(stderr, "%s progPos %d %d\n", timeStamp, progCycles, progPos);
-  }
-}
-
-//--------------------------------------------------------------------------------------------------
-void watchDog()
-{
-  pthread_t threadId;
-  int err = pthread_create(&threadId, NULL, &watchDogThread, NULL);
-}
-
-//--------------------------------------------------------------------------------------------------
 void initContext() 
 {
   if(debug_data) printf("initContext...\n");
@@ -389,41 +376,29 @@ void closeInDev()
 //--------------------------------------------------------------------------------------------------
 void reinit()
 {
-  progPos = 4001;
-
   printf("reinit...\n");
 
   closeOutDev();
-  progPos = 4002;
   closeInDev();
-  progPos = 4003;
   CodecHandler_closeCodec(&codecHandler);
-  progPos = 4004;
   CodecHandler_deinit(&codecHandler);
-  progPos = 4005;
 
   // snd_pcm_drain(read_state.dev); // long delay !?
 
   read_state.dev = alsa_open(alsa_dev_name, 0);
-  progPos = 4006;
   initContext();
-  progPos = 4007;
   CodecHandler_init(&codecHandler);
 
-  progPos = 4008;
   skipPkts = skip_packets_after_restart; // skip first packets on next start to prevent cracks and latencies
 
   printf("reinit...ok\n");
 	fflush(stdout);
-  progPos = 4009;
 }
 
 //--------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
-  watchDog();
-
 	char *out_dev_name = NULL;
 	int opt;
   double start = 0;
@@ -489,7 +464,6 @@ int main(int argc, char **argv)
 
 	while(1) 
   {
-    progPos = 1000;
     progCycles ++;
 
     if(debug_data)
@@ -497,22 +471,15 @@ int main(int argc, char **argv)
 
 		int ret = my_spdif_read_packet(spdif_ctx, &pkt, (uint8_t*)resamples, MAX_BURST_SIZE, &howmuch);
 
-    progPos = 2000;
-
     if(ret == SPIF_DECODER_RETRY_REQUIRED)
       continue;
-
-    progPos = 3000;
 
     if(ret == SPIF_DECODER_RESTART_REQUIRED)
     {
       // codec changed ... reinit system
-      progPos = 4000;
       reinit();
       continue;
     }
-
-    progPos = 5000;
 
     if(ret && ret != SPIF_DECODER_PCM)
       errx(1, "error: read packet");
@@ -522,17 +489,13 @@ int main(int argc, char **argv)
 
     if(ret == SPIF_DECODER_PCM)
     {
-      progPos = 6000;
-
       CodecHandler_closeCodec(&codecHandler);
       codecHandler.currentChannelCount = 2;
       codecHandler.currentSampleRate = 48000;
       howmuch = MAX_BURST_SIZE;
-      progPos = 7000;
     }
     else
     {
-      progPos = 8000;
       CodecHandler_loadCodec(&codecHandler, spdif_ctx);
 
       if( (ret = CodecHandler_decodeCodec(&codecHandler, &pkt, (uint8_t*)resamples, &howmuch)) == 1)
@@ -540,8 +503,6 @@ int main(int argc, char **argv)
         //channel count has changed
         closeOutDev();
       }
-
-      progPos = 9000;
 
       if(!ret && !codecHandler.currentSampleRate) 
       {
@@ -553,13 +514,9 @@ int main(int argc, char **argv)
       if(ret == SPIF_DECODER_RESTART_REQUIRED) 
       {
         // decodeing failed, restart
-        progPos = 10000;
         reinit();
-        progPos = 11000;
         continue;
       }
-
-      progPos = 12000;
 
       if(pkt.size != 0)
         printf("still some bytes left %d\n",pkt.size);
@@ -567,37 +524,26 @@ int main(int argc, char **argv)
 
     if (!out_dev) 
     {
-      progPos = 13000;
       sendInfoToSocket(&codecHandler);
 
-      progPos = 14000;
-
       out_dev = alsa_open(out_dev_name, codecHandler.currentChannelCount);
-
-      progPos = 15000;
 
       if (!out_dev)
         errx(1, "cannot open audio output, channels=%d, format=s16, rate=%d", codecHandler.currentChannelCount, codecHandler.currentSampleRate);
 
-      progPos = 16000;
+      outDelay = 0;
     }
 
     if(debug_data)
       start = gettimeofday_ms();
 
-    progPos = 17000;
-
     if(!alsa_write(resamples, howmuch))
       errx(1, "Could not play audio to output device");
-
-    progPos = 18000;
 
     if(debug_data)
       printf("alsa_write() frames=%d ms=%.1f in %.1lf ms\n", howmuch / 2 / codecHandler.currentChannelCount, howmuch / 2 / codecHandler.currentChannelCount / 48.0, gettimeofday_ms() - start);
 
     av_packet_unref(&pkt); 
-
-    progPos = 19000;
 	}
 
 	return (0);
