@@ -23,7 +23,7 @@ Build ffmpeg shared library with a minimal set for alsa and AC3 support
 
 Build spdif-decoder
 -----
-Prepare CMakeLists.txt - set FFMPEG Var with Path to ffmpeg (if not in ../ffmpeg-4.3.1)
+Prepare CMakeLists.txt - set FFMPEG Var with Path to ffmpeg (if not in ./ffmpeg-4.3.1)
 
     cmake .
     make
@@ -33,7 +33,7 @@ Run
 
 I run it like this:
 
-    ./spdif-decoder -i hw:CARD=Device -d pulse -o alsa_output.usb-0d8c_USB_Sound_Device-00-Device.analog-surround51
+    ./spdif-decoder -i hw:CARD=Device -o alsa_output.usb-0d8c_USB_Sound_Device-00-Device.analog-surround51
 
 Alsa's `hw:CARD=Device` is my SPDIF input.  You can list your alsa devices with
 
