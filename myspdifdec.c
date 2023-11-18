@@ -32,7 +32,7 @@
 #include "libavcodec/adts_parser.h"
 #include "libavutil/bswap.h"
 
-extern int debug_data, skipPkts;
+extern int debug_data;
 
 static int spdif_get_offset_and_codec(AVFormatContext *s,
                                       enum IEC61937DataType data_type,
@@ -141,13 +141,6 @@ int my_spdif_read_packet(AVFormatContext *spdif_ctx, AVPacket *pkt,
     	}
       else 
       {
-        if(skipPkts) 
-        {
-          skipPkts--;
-          printf("skipping packet %d\n", skipPkts);
-          return SPIF_DECODER_RETRY_REQUIRED;
-        }
-
         if(last_data_type)
           printf("No packet found > PCM\n");
 
@@ -251,14 +244,6 @@ int my_spdif_read_packet(AVFormatContext *spdif_ctx, AVPacket *pkt,
         printf("read_packet skip %d bytes in %.1lf ms\n", skip_bytes, gettimeofday_ms() - start);
         start = end;
       }
-    }
-
-    if(skipPkts) 
-    {
-      skipPkts--;
-      av_free_packet(pkt);
-      printf("skipping packet %d\n", skipPkts);
-      return SPIF_DECODER_RETRY_REQUIRED;
     }
 
     if (!spdif_ctx->nb_streams) 

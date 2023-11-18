@@ -51,7 +51,7 @@ snd_pcm_t *out_dev = NULL;
 
 struct alsa_read_state read_state = {.dev = NULL,};
 
-int debug_data = 0, skip_packets_after_restart = 0, skipPkts = 0, progPos = 0, progCycles = 0;
+int debug_data = 0, progPos = 0, progCycles = 0;
 int outDelay = 0;
 
 //--------------------------------------------------------------------------------------------------
@@ -62,7 +62,6 @@ void usage(void)
 		"  spdif-loop -i <alsa-input-dev> -o <alsa-output-dev>\n\n"
 
     " -b n ... output device buffer time in ms (default 2 packets = 64ms)\n"
-    " -s n ... skip n packets after codec change (default 0)\n"
     " -v   ... verbose\n");
 	exit(1);
 }
@@ -389,8 +388,6 @@ void reinit()
   initContext();
   CodecHandler_init(&codecHandler);
 
-  skipPkts = skip_packets_after_restart; // skip first packets on next start to prevent cracks and latencies
-
   printf("reinit...ok\n");
 	fflush(stdout);
 }
@@ -403,7 +400,7 @@ int main(int argc, char **argv)
 	int opt;
   double start = 0;
 
-	for (opt = 0; (opt = getopt(argc, argv, "hi:o:vb:s:")) != -1;) {
+	for (opt = 0; (opt = getopt(argc, argv, "hi:o:vb:")) != -1;) {
 		switch (opt) {
 		case 'i':
 			alsa_dev_name = optarg;
@@ -416,9 +413,6 @@ int main(int argc, char **argv)
 			break;
     case 'b':
       out_dev_buffer_time = optarg;
-      break;
-    case 's':
-      skipPkts = skip_packets_after_restart = atoi(optarg);
       break;
 		default:
 			usage();
