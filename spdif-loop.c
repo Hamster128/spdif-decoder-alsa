@@ -87,6 +87,9 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size)
       printf("error: alsa failed to prepare input device: %s", snd_strerror(err));
       return AVERROR_EOF;
     }
+
+    if(debug_data)
+      printf("alsa input prepared\n");
   }
 
   int frames = buf_size / 4;
@@ -118,35 +121,6 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size)
   }
 }
 
-
-//--------------------------------------------------------------------------------------------------
-/*
-#define ALSA_MAX_CHANNELS 6
-static snd_pcm_chmap_t* alsa_create_channel_map(int channels)
-{
-  size_t size = offsetof(snd_pcm_chmap_t, pos[channels]);
-  snd_pcm_chmap_t* map = (snd_pcm_chmap_t*) calloc(1, size);
-
-  // Using SMPTE layout:
-  enum snd_pcm_chmap_position layout[ALSA_MAX_CHANNELS][ALSA_MAX_CHANNELS] = {
-    { SND_CHMAP_MONO },
-    { SND_CHMAP_FL, SND_CHMAP_FR },
-    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_LFE },
-    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_SL, SND_CHMAP_SR },
-    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_SL, SND_CHMAP_SR, SND_CHMAP_FC},
-    { SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_SL, SND_CHMAP_SR, SND_CHMAP_FC, SND_CHMAP_LFE}
-  };
-
-  map->channels = channels;
-
-  for (int i = 0 ; i < map->channels ; ++i) 
-  {
-    map->pos[i] = layout[map->channels - 1][i];
-  }
-
-  return map;
-}
-*/
 //--------------------------------------------------------------------------------------------------
 ssize_t alsa_write(sample_t *buf, int buf_size)
 {
@@ -162,24 +136,8 @@ ssize_t alsa_write(sample_t *buf, int buf_size)
       return 0;
     }
 
-/*  
-    snd_pcm_chmap_t *map = alsa_create_channel_map(codecHandler.currentChannelCount);
-
-    if(!map)
-    {
-      printf("alsa error: cannot create channel map\n");
-      return 0;
-    }
-
-    err = snd_pcm_set_chmap(out_dev, map);
-    free(map);
-
-    if(err)
-    {
-      printf("alsa error: cannot set channel map %s\n", snd_strerror(err));
-      return 0;
-    }
-*/    
+    if(debug_data)
+      printf("alsa output prepared\n");
   }
 
   snd_pcm_sframes_t delay;
@@ -227,6 +185,10 @@ snd_pcm_t* alsa_open(char* dev_name, int channels)
 	snd_pcm_hw_params_t *p = NULL;
   snd_pcm_t *dev = NULL;
   int err;
+  double start;
+
+  if(debug_data)
+    start = gettimeofday_ms();
 
 	if ((err = snd_pcm_open(&dev, dev_name, channels ? SND_PCM_STREAM_PLAYBACK : SND_PCM_STREAM_CAPTURE, 0)) < 0)
 		errx(1, "alsa error: failed to open device: %s", snd_strerror(err));
@@ -270,6 +232,9 @@ snd_pcm_t* alsa_open(char* dev_name, int channels)
 		errx(1, "alsa error: failed to set params: %s", snd_strerror(err));
 
 	snd_pcm_hw_params_free(p);
+
+  if(debug_data) 
+    printf("alse open %s, channels=%d in %.1lf ms\n", dev_name, channels, gettimeofday_ms() - start);
 
   return dev;
 }
@@ -389,6 +354,22 @@ void reinit()
   CodecHandler_init(&codecHandler);
 
   printf("reinit...ok\n");
+	fflush(stdout);
+}
+
+//--------------------------------------------------------------------------------------------------
+void reinit_input()
+{
+  printf("reinit input...\n");
+
+  closeInDev();
+
+  // snd_pcm_drain(read_state.dev); // long delay !?
+
+  read_state.dev = alsa_open(alsa_dev_name, 0);
+  initContext();
+
+  printf("reinit input...ok\n");
 	fflush(stdout);
 }
 
@@ -525,7 +506,12 @@ int main(int argc, char **argv)
       if (!out_dev)
         errx(1, "cannot open audio output, channels=%d, format=s16, rate=%d", codecHandler.currentChannelCount, codecHandler.currentSampleRate);
 
+
       outDelay = 0;
+
+      // alsa_open() takes some time, flush input and restart with lowest possible latency
+      reinit_input();
+      memset(resamples, 0, howmuch);
     }
 
     if(debug_data)
