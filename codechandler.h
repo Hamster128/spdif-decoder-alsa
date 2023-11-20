@@ -19,6 +19,7 @@ typedef struct s_codechandler{
 	int currentChannelCount;
 	uint64_t currentChannelLayout;
 	int currentSampleRate;
+	enum AVSampleFormat currentSampleFormat;
 	SwrContext * swr;
 	AVFrame * frame;
 } CodecHandler;

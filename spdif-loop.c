@@ -77,10 +77,7 @@ static int alsa_reader(void *data, uint8_t *buf, int buf_size)
   double start = 0;
 
   if(debug_data) 
-  {
-    printf("alsa_reader %d bytes\n", buf_size);
     start = gettimeofday_ms();
-  }
 
 	if (snd_pcm_state(state->dev) == SND_PCM_STATE_SETUP)
   {

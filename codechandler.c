@@ -111,15 +111,24 @@ int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt, uint8_t *outbuffe
 	pkt->data += processed_len;
 	pkt->size -= processed_len;
 
+	//printf("current %d %d %08x\n", h->currentChannelCount, h->currentSampleRate, h->currentChannelLayout);
+	//printf("codec   %d %d %08x\n", h->codecContext->channels, h->codecContext->sample_rate, h->codecContext->channel_layout);
+
+	if(!h->codecContext->sample_rate) {
+		printf("decodeCodec: no sample rate > restart\n");
+		return SPIF_DECODER_RESTART_REQUIRED;
+	}
+
 	if(h->currentChannelCount  != h->codecContext->channels        || 
      h->currentSampleRate    != h->codecContext->sample_rate     ||
-     h->currentChannelLayout != h->codecContext->channel_layout     )
+     h->currentChannelLayout != h->codecContext->channel_layout  ||
+		 h->currentSampleFormat  != h->codecContext->sample_fmt         )
   {
     if(debug_data) printf("decodeCodec loadFromCodec\n");
 
 		resample_loadFromCodec(h->swr, h->codecContext);
 
-    if(h->currentChannelCount && h->currentChannelCount  != h->codecContext->channels)
+    if(debug_data && h->currentChannelCount && h->currentChannelCount  != h->codecContext->channels)
       printf("channels changed: %d > %d, channel-layout:%08x > %08x\n", h->currentChannelCount, h->codecContext->channels, h->currentChannelLayout, h->codecContext->channel_layout);
 
 		ret = 1;
@@ -127,7 +136,12 @@ int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt, uint8_t *outbuffe
 
   if(debug_data) printf("decodeCodec swr_convert\n");
 
-	swr_convert(h->swr, &outbuffer, h->frame->nb_samples, (const uint8_t **)h->frame->data, h->frame->nb_samples);
+  int samples = swr_convert(h->swr, &outbuffer, h->frame->nb_samples, (const uint8_t **)h->frame->data, h->frame->nb_samples);
+	if(samples < 0)
+	{
+		printf("decodeCodec: swr_convert failed > restart (%s)\n", my_av_strerror(samples));
+		return SPIF_DECODER_RESTART_REQUIRED;
+	}
 
   if(debug_data) printf("decodeCodec get_buffer_size\n");
 
@@ -140,6 +154,7 @@ int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt, uint8_t *outbuffe
 	h->currentChannelCount  = h->codecContext->channels;
 	h->currentSampleRate    = h->codecContext->sample_rate;
 	h->currentChannelLayout = h->codecContext->channel_layout;
+	h->currentSampleFormat  = h->codecContext->sample_fmt;
 
   if(debug_data) printf("decodeCodec done\n");
 	return ret;
@@ -157,6 +172,7 @@ int CodecHandler_closeCodec(CodecHandler * handler)
 
 	handler->codec = NULL;
 	handler->codecContext = NULL;
+	handler->currentCodecID = 0;
 
 	return 0;
 }
