@@ -482,13 +482,6 @@ int main(int argc, char **argv)
         closeOutDev();
       }
 
-      if(!ret && !codecHandler.currentSampleRate) 
-      {
-        // decodeing did not set a sample rate > retry
-        printf("no sample rate detected!\n");
-        ret = SPIF_DECODER_RESTART_REQUIRED;
-      }
-
       if(ret == SPIF_DECODER_RESTART_REQUIRED) 
       {
         // decodeing failed, restart
