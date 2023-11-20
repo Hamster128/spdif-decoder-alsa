@@ -88,14 +88,11 @@ int CodecHandler_loadCodec(CodecHandler * handler, AVFormatContext * formatconte
 
 	handler->currentCodecID = formatcontext->streams[0]->codec->codec_id;
 
-  printf("Loaded codec %s\n", avcodec_get_name(handler->currentCodecID));
-
-	return 0;
+	return 1;
 }
 
 //--------------------------------------------------------------------------------------------------
-int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt,
-		uint8_t *outbuffer, uint32_t* bufferfilled)
+int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt, uint8_t *outbuffer, uint32_t* bufferfilled)
 {
 	int got_frame;
 
@@ -118,12 +115,12 @@ int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt,
      h->currentSampleRate    != h->codecContext->sample_rate     ||
      h->currentChannelLayout != h->codecContext->channel_layout     )
   {
-    if(debug_data) printf("ecodeCodec loadFromCodec\n");
+    if(debug_data) printf("decodeCodec loadFromCodec\n");
 
 		resample_loadFromCodec(h->swr, h->codecContext);
 
     if(h->currentChannelCount && h->currentChannelCount  != h->codecContext->channels)
-      printf("channels changed: %d > %d\n", h->currentChannelCount, h->codecContext->channels);
+      printf("channels changed: %d > %d, channel-layout:%08x > %08x\n", h->currentChannelCount, h->codecContext->channels, h->currentChannelLayout, h->codecContext->channel_layout);
 
 		ret = 1;
 	}

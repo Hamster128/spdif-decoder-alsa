@@ -62,7 +62,11 @@ void usage(void)
 		"  spdif-loop -i <alsa-input-dev> -o <alsa-output-dev>\n\n"
 
     " -b n ... output device buffer time in ms (default 2 packets = 64ms)\n"
-    " -v   ... verbose\n");
+    " -v   ... verbose\n\n"
+
+    " <alsa-output-dev> can contain '#' to direct output to different devices depending on channel count.\n"
+    "   ex: -o dsp#    2 channels -> dsp2, 6 channels -> dsp6, and so on\n");
+
 	exit(1);
 }
 
@@ -377,7 +381,7 @@ void reinit_input()
 //--------------------------------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
-	char *out_dev_name = NULL;
+	char *out_dev_name = NULL, *out_dev_name_ch = NULL;
 	int opt;
   double start = 0;
 
@@ -388,6 +392,7 @@ int main(int argc, char **argv)
 			break;
 		case 'o':
 			out_dev_name = optarg;
+      out_dev_name_ch = strchr(out_dev_name, '#');
 			break;
 		case 'v':
 			debug_data = 1;
@@ -467,11 +472,12 @@ int main(int argc, char **argv)
       CodecHandler_closeCodec(&codecHandler);
       codecHandler.currentChannelCount = 2;
       codecHandler.currentSampleRate = 48000;
+      codecHandler.currentChannelLayout = AV_CH_LAYOUT_STEREO;
       howmuch = MAX_BURST_SIZE;
     }
     else
     {
-      CodecHandler_loadCodec(&codecHandler, spdif_ctx);
+      int newCodec = CodecHandler_loadCodec(&codecHandler, spdif_ctx);
 
       if( (ret = CodecHandler_decodeCodec(&codecHandler, &pkt, (uint8_t*)resamples, &howmuch)) == 1)
       {
@@ -493,6 +499,9 @@ int main(int argc, char **argv)
         continue;
       }
 
+      if(newCodec)
+        printf("Loaded codec %s channels:%d, channel-layout:%08x \n", avcodec_get_name(codecHandler.currentCodecID), codecHandler.currentChannelCount, codecHandler.currentChannelLayout);
+
       if(pkt.size != 0)
         printf("still some bytes left %d\n",pkt.size);
     }
@@ -500,6 +509,9 @@ int main(int argc, char **argv)
     if (!out_dev) 
     {
       sendInfoToSocket(&codecHandler);
+
+      if(out_dev_name_ch)
+        *out_dev_name_ch = '0' + codecHandler.currentChannelCount;
 
       out_dev = alsa_open(out_dev_name, codecHandler.currentChannelCount);
 
