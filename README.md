@@ -9,6 +9,12 @@ just in software.
 FFMPEG is licenced under the GNU Lesser General Public License version 2.1 and so is 
 this piece of software. 
 
+This project is a fork from morningstar1/spdif-decoder and includes the following changes:
+- Optimized to run on a RaspberryPi
+- Latency optimized
+- can switch between different DolbyDigital codecs
+- can switch between DolbyDigital and PCM
+
 Requirements
 ------------
 - libasound2-dev
