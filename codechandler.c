@@ -111,9 +111,6 @@ int CodecHandler_decodeCodec(CodecHandler * h, AVPacket * pkt, uint8_t *outbuffe
 	pkt->data += processed_len;
 	pkt->size -= processed_len;
 
-	//printf("current %d %d %08x\n", h->currentChannelCount, h->currentSampleRate, h->currentChannelLayout);
-	//printf("codec   %d %d %08x\n", h->codecContext->channels, h->codecContext->sample_rate, h->codecContext->channel_layout);
-
 	if(!h->codecContext->sample_rate) {
 		printf("decodeCodec: no sample rate > restart\n");
 		return SPIF_DECODER_RESTART_REQUIRED;

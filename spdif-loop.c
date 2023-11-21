@@ -51,7 +51,7 @@ snd_pcm_t *out_dev = NULL;
 
 struct alsa_read_state read_state = {.dev = NULL,};
 
-int debug_data = 0, progPos = 0, progCycles = 0;
+int debug_data = 0;
 int outDelay = 0;
 
 //--------------------------------------------------------------------------------------------------
@@ -365,8 +365,6 @@ void reinit_input()
 
   closeInDev();
 
-  // snd_pcm_drain(read_state.dev); // long delay !?
-
   read_state.dev = alsa_open(alsa_dev_name, 0);
   initContext();
 
@@ -441,8 +439,6 @@ int main(int argc, char **argv)
 
 	while(1) 
   {
-    progCycles ++;
-
     if(debug_data)
       start = gettimeofday_ms();
 
