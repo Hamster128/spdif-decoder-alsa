@@ -149,7 +149,7 @@ ssize_t alsa_write(sample_t *buf, int buf_size)
   {
     delay /= 48;
 
-    if(delay > outDelay) 
+    if(delay > outDelay || delay < outDelay-1) 
     {
     outDelay = delay;
     printf("alsa output latency: %d ms\n", outDelay);
@@ -275,9 +275,10 @@ void* sendInfoToSocketThread(CodecHandler* codecHandler)
 
   char msg[1024];
 
-  sprintf(msg, "{\"codec\":\"%s\", \"channels\":%d}\n", 
+  sprintf(msg, "{\"codec\":\"%s\", \"channels\":%d, \"service_type\":%d}\n", 
     avcodec_get_name(codecHandler->currentCodecID), 
-    codecHandler->currentChannelCount);
+    codecHandler->currentChannelCount,
+    codecHandler->codecContext ? codecHandler->codecContext->audio_service_type : -1);
 
   write(sockfd, msg, strlen(msg));
   
@@ -417,7 +418,7 @@ int main(int argc, char **argv)
 	avdevice_register_all();
 	ao_initialize();
 
-  char *resamples = malloc(1*1024*1024);
+  char *resamples = malloc(1024*1024);
 
   read_state.dev = alsa_open(alsa_dev_name, 0);
 
@@ -509,7 +510,36 @@ int main(int argc, char **argv)
 
       // alsa_open() takes some time, flush input and restart with lowest possible latency
       reinit_input();
-      memset(resamples, 0, howmuch);
+
+      av_packet_unref(&pkt); // reset packet for reuse
+      continue;
+    }
+
+    // remove some frames to catch up
+    if(outDelay >= 30)  // ms
+    {
+      int frameSize = 2 * codecHandler.currentChannelCount;
+      int frames = howmuch / frameSize;
+      int offset = 0;
+
+      printf("catch up %d frames\n", frames / 8);
+
+      frames -= frames / 8;
+
+      for(int f=0; f < frames; f++)
+      {
+        int frameOffset = f * frameSize;
+
+        for(int b = 0; b < frameSize; b++) {
+          resamples[frameOffset + b] = resamples[frameOffset + b + offset];
+        }
+
+        if(f % 8 == 0) {
+          offset += frameSize;
+        }
+      }
+
+      howmuch = frames * frameSize;
     }
 
     if(debug_data)
@@ -521,7 +551,7 @@ int main(int argc, char **argv)
     if(debug_data)
       printf("alsa_write() frames=%d ms=%.1f in %.1lf ms\n", howmuch / 2 / codecHandler.currentChannelCount, howmuch / 2 / codecHandler.currentChannelCount / 48.0, gettimeofday_ms() - start);
 
-    av_packet_unref(&pkt); 
+    av_packet_unref(&pkt); // reset packet for reuse
 	}
 
 	return (0);
